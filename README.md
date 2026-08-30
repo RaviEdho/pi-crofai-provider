@@ -23,8 +23,7 @@ Two equivalent ways:
 1. **Interactive** (recommended) — stores the key in `~/.pi/agent/auth.json`:
 
    ```
-   /login crofai             # prompts for the CrofAI API key (secret input)
-   /login crofai-responses   # same, for the Responses API provider
+   /login crofai   # prompts for the CrofAI API key (secret input)
    ```
 
 2. **Environment variable** — used automatically when no stored credential exists:
@@ -34,23 +33,23 @@ Two equivalent ways:
    ```
 
 Resolution order per request: **stored credential → `$CROFAI_API_KEY` → unconfigured**
-(providers without a resolvable key are hidden from `/model`). `pi logout crofai`
+(a provider without a resolvable key is hidden from `/model`). `pi logout crofai`
 removes the stored key if you ever want to switch back to the env var.
 
-## Providers
+## Provider
 
 | Provider | Endpoint | API |
 |----------|----------|-----|
-| `crofai` | `https://crof.ai/v1/chat/completions` | `openai-completions` (primary) |
-| `crofai-responses` | `https://crof.ai/v1/responses` | `openai-responses` (alternative) |
+| `crofai` | `https://crof.ai/v1/chat/completions` | `openai-completions` |
 
-Both share the same model catalogue, live-priced from `GET https://crof.ai/v1/models`
-(public, no auth). The list refreshes at every pi start and on `/reload`; a static
-snapshot (embedded in `extensions/index.ts`) is used as fallback when the endpoint is
-unreachable — startup never blocks on the network (8s fetch timeout).
+A single provider: CrofAI's primary documented endpoint, chat completions. The model
+catalogue is live-priced from `GET https://crof.ai/v1/models` (public, no auth). The
+list refreshes at every pi start and on `/reload`; a static snapshot (embedded in
+`extensions/index.ts`) is used as fallback when the endpoint is unreachable — startup
+never blocks on the network (8s fetch timeout).
 
 Select a model with `/model` (or Ctrl+P), e.g. `crofai/glm-5.2`,
-`crofai/deepseek-v4-pro`, `crofai/greg-2-super`, `crofai-responses/kimi-k3`.
+`crofai/deepseek-v4-pro`, `crofai/greg-2-super`, `crofai/kimi-k3`.
 
 ## How it maps to CrofAI's implementation
 
@@ -85,12 +84,6 @@ Select a model with `/model` (or Ctrl+P), e.g. `crofai/glm-5.2`,
   (their docs show `"strict": true`); `response_format` JSON schema works via pi.
 - **Vision** — standard `image_url` content; the `input` field is set from CrofAI's
   (vision) tag list on the pricing page (`images: yes` in `pi --list-models`).
-- **Responses API** — pi's `openai-responses` is stateless (full `input` every turn,
-  function tools only), which matches CrofAI's stateless, function-tools-only
-  implementation. `reasoning` is deliberately left `false` there so requests stay
-  minimal (no `reasoning: {…}` / `include: ["reasoning.encrypted_content"]` params that
-  non-OpenAI gateways are likeliest to reject); thinking output still streams in as
-  reasoning items. Use the `crofai` provider when you want `reasoning_effort` control.
 
 ## Troubleshooting
 
@@ -98,8 +91,6 @@ Select a model with `/model` (or Ctrl+P), e.g. `crofai/glm-5.2`,
   `/login crofai` or make sure `CROFAI_API_KEY` is exported in the environment pi runs in.
 - **`reasoning_effort` rejected on a new model** — newer models are auto-discovered;
   if `/v1/models` starts returning the flag for a model, it's picked up automatically.
-- **404 / 400 on the responses provider** — the chat-completions `crofai` provider is
-  the fully documented path; fall back to it.
 - **Stale model list** — the embedded snapshot is a point-in-time copy; run `/reload`
   with network access to re-fetch, or bump the snapshot from
   `curl https://crof.ai/v1/models`.
