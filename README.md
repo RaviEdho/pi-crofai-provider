@@ -16,13 +16,26 @@ pi install git:github.com/RaviEdho/pi-crofai-provider
 pi -e ./pi-crofai
 ```
 
-Then configure your key (resolved at request time):
+## Authentication
 
-```bash
-export CROFAI_API_KEY="your-key-from-crof.ai"   # their documented env var name
-```
+Two equivalent ways:
 
-`pi list` shows installed packages; `pi remove pi-crofai` uninstalls.
+1. **Interactive** (recommended) — stores the key in `~/.pi/agent/auth.json`:
+
+   ```
+   /login crofai             # prompts for the CrofAI API key (secret input)
+   /login crofai-responses   # same, for the Responses API provider
+   ```
+
+2. **Environment variable** — used automatically when no stored credential exists:
+
+   ```bash
+   export CROFAI_API_KEY="your-key-from-crof.ai"   # their documented env var name
+   ```
+
+Resolution order per request: **stored credential → `$CROFAI_API_KEY` → unconfigured**
+(providers without a resolvable key are hidden from `/model`). `pi logout crofai`
+removes the stored key if you ever want to switch back to the env var.
 
 ## Providers
 
@@ -81,8 +94,8 @@ Select a model with `/model` (or Ctrl+P), e.g. `crofai/glm-5.2`,
 
 ## Troubleshooting
 
-- **Provider missing from `/model`** — pi hides providers with no resolvable key; make
-  sure `CROFAI_API_KEY` is exported in the environment pi runs in.
+- **Provider missing from `/model`** — pi hides providers with no resolvable key; run
+  `/login crofai` or make sure `CROFAI_API_KEY` is exported in the environment pi runs in.
 - **`reasoning_effort` rejected on a new model** — newer models are auto-discovered;
   if `/v1/models` starts returning the flag for a model, it's picked up automatically.
 - **404 / 400 on the responses provider** — the chat-completions `crofai` provider is

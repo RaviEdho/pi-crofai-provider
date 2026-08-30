@@ -3,9 +3,14 @@
  *
  * Implements CrofAI's OpenAI-compatible endpoints per https://crof.ai/docs:
  *
- *   - Chat Completions: https://crof.ai/v1/chat/completions  (primary, `api: "openai-completions"`)
- *   - Responses API:    https://crof.ai/v1/responses         (alternative, `api: "openai-responses"`)
+ *   - Chat Completions: https://crof.ai/v1/chat/completions  (primary, `openai-completions`)
+ *   - Responses API:    https://crof.ai/v1/responses         (alternative, `openai-responses`)
  *   - Models list:      GET https://crof.ai/v1/models        (public, no auth required)
+ *
+ * Authentication (`/login` flow via envApiKeyAuth):
+ *   - `/login crofai` (or `/login crofai-responses`) prompts for the API key and
+ *     stores it in ~/.pi/agent/auth.json.
+ *   - Resolution order per request: stored credential -> $CROFAI_API_KEY -> unconfigured.
  *
  * CrofAI quirks handled here:
  *   - `reasoning_effort` is a top-level request param with values "low" | "medium" | "high" | "none".
@@ -21,17 +26,22 @@
  *   - The Responses API is stateless: no `previous_response_id`, `store`, or server-side
  *     tools. pi's `openai-responses` is stateless too (send full input every turn), so it
  *     lines up; the `reasoning`/`include` params are skipped there to stay minimal.
- *
- * Setup: export your key as CROFAI_API_KEY (their documented env var name), e.g.
- *   export CROFAI_API_KEY="..."
- * or override via models.json / /login.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  createProvider,
+  envApiKeyAuth,
+  type Model,
+  type ModelCost,
+} from "@earendil-works/pi-ai/compat";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
+import { openAIResponsesApi } from "@earendil-works/pi-ai/compat";
 
 const BASE_URL = "https://crof.ai/v1";
 const MODELS_URL = "https://crof.ai/v1/models";
 const FALLBACK_MODEL_TIMEOUT_MS = 8_000;
+const API_KEY_ENV_VARS = ["CROFAI_API_KEY"] as const;
 
 /**
  * Vision-capable model ids. /v1/models doesn't advertise vision support;
@@ -71,7 +81,7 @@ const THINKING_LEVEL_MAP = {
 } as const;
 
 /**
- * Provider-wide compat for chat completions. Justification per CrofAI docs:
+ * Compat for chat completions models. Justification per CrofAI docs:
  *   - supportsDeveloperRole: false — CrofAI routes across many open-source
  *     backends; "system" is the universally accepted role.
  *   - supportsReasoningEffort: true — top-level `reasoning_effort` per docs.
@@ -88,6 +98,11 @@ const CHAT_COMPAT = {
   supportsStrictMode: true,
   maxTokensField: "max_completion_tokens",
   thinkingFormat: "openai",
+} as const;
+
+/** Compat for Responses API models: keep requests minimal and standard. */
+const RESPONSES_COMPAT = {
+  supportsDeveloperRole: false,
 } as const;
 
 /** Minimal shape of a /v1/models entry (https://crof.ai/docs -> /models API). */
@@ -110,32 +125,45 @@ function toUSDPerM(value: string | number | undefined): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function toModelConfig(m: CrofAIAPIModel) {
+type CrofAIApi = "openai-completions" | "openai-responses";
+
+/** Build a native pi-ai Model for one CrofAI API model entry. */
+function toModelConfig<TApi extends CrofAIApi>(
+  api: TApi,
+  provider: string,
+  m: CrofAIAPIModel,
+  enableReasoning: boolean,
+): Model<TApi> {
   // reasoning_effort: true is CrofAI's own capability flag: it means the model
   // accepts the reasoning_effort param. (greg models use always-on "custom
   // reasoning" without the param — their reasoning_content deltas still stream
   // as thinking blocks in pi, but pi won't send reasoning_effort for them.)
-  const reasoning = m.reasoning_effort === true;
+  const reasoning = enableReasoning && m.reasoning_effort === true;
+  const cost: ModelCost = {
+    input: toUSDPerM(m.pricing?.prompt),
+    output: toUSDPerM(m.pricing?.completion),
+    cacheRead: toUSDPerM(m.pricing?.cache_prompt),
+    cacheWrite: 0, // CrofAI does not report cache-write pricing
+  };
   return {
     id: m.id,
     name: m.name ?? m.id,
+    api,
+    provider,
+    baseUrl: BASE_URL,
     reasoning,
+    // Only reasoning_effort-capable models get the thinking level map, so
+    // pi never sends reasoning_effort to models that don't accept it.
+    thinkingLevelMap: reasoning ? THINKING_LEVEL_MAP : undefined,
     input: (VISION_MODEL_IDS.has(m.id) ? ["text", "image"] : ["text"]) as Array<"text" | "image">,
-    cost: {
-      input: toUSDPerM(m.pricing?.prompt),
-      output: toUSDPerM(m.pricing?.completion),
-      cacheRead: toUSDPerM(m.pricing?.cache_prompt),
-      cacheWrite: 0, // CrofAI does not report cache-write pricing
-    },
+    cost,
     contextWindow: Number(m.context_length) || 128_000,
     maxTokens: Number(m.max_completion_tokens) || 8_192,
-    compat: {
-      ...CHAT_COMPAT,
-      // Only reasoning_effort-capable models get the thinking level map, so
-      // pi never sends reasoning_effort to models that don't accept it.
-      ...(reasoning ? { thinkingLevelMap: THINKING_LEVEL_MAP } : {}),
-    },
-  };
+    compat:
+      api === "openai-completions"
+        ? { ...CHAT_COMPAT }
+        : { ...RESPONSES_COMPAT },
+  } as Model<TApi>;
 }
 
 /**
@@ -190,17 +218,23 @@ export default async function (pi: ExtensionAPI) {
     fetchCrofAIModels(),
     Promise.resolve(FALLBACK_MODELS),
   ]);
-  const models = liveModels ?? fallbackModels;
-  const configs = models.map(toModelConfig);
+  const apiModels = liveModels ?? fallbackModels;
 
   // Primary: Chat Completions endpoint (https://crof.ai/v1/chat/completions).
-  pi.registerProvider("crofai", {
-    name: "CrofAI",
-    baseUrl: BASE_URL,
-    apiKey: "$CROFAI_API_KEY",
-    api: "openai-completions",
-    models: configs,
-  });
+  pi.registerProvider(
+    createProvider({
+      id: "crofai",
+      name: "CrofAI",
+      baseUrl: BASE_URL,
+      // /login crofai -> secret prompt, stored in ~/.pi/agent/auth.json;
+      // stored credential wins, otherwise $CROFAI_API_KEY, otherwise unconfigured.
+      auth: { apiKey: envApiKeyAuth("CrofAI API key", API_KEY_ENV_VARS) },
+      models: apiModels.map((m) =>
+        toModelConfig("openai-completions", "crofai", m, /* enableReasoning */ true),
+      ) as Model<"openai-completions">[],
+      api: openAICompletionsApi(),
+    }),
+  );
 
   // Alternative: OpenAI Responses API (https://crof.ai/v1/responses).
   // pi's openai-responses is stateless (full `input` every turn) and uses
@@ -209,15 +243,16 @@ export default async function (pi: ExtensionAPI) {
   // stays minimal (no reasoning{} param / no include:["reasoning.encrypted_content"],
   // which OpenAI-format gateways are the likeliest to reject); thinking text
   // still streams in as reasoning items.
-  pi.registerProvider("crofai-responses", {
-    name: "CrofAI (Responses API)",
-    baseUrl: BASE_URL,
-    apiKey: "$CROFAI_API_KEY",
-    api: "openai-responses",
-    models: configs.map((model) => ({
-      ...model,
-      reasoning: false,
-      compat: { ...model.compat, thinkingLevelMap: undefined },
-    })),
-  });
+  pi.registerProvider(
+    createProvider({
+      id: "crofai-responses",
+      name: "CrofAI (Responses API)",
+      baseUrl: BASE_URL,
+      auth: { apiKey: envApiKeyAuth("CrofAI API key", API_KEY_ENV_VARS) },
+      models: apiModels.map((m) =>
+        toModelConfig("openai-responses", "crofai-responses", m, /* enableReasoning */ false),
+      ) as Model<"openai-responses">[],
+      api: openAIResponsesApi(),
+    }),
+  );
 }

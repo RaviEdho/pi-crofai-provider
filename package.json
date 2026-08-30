@@ -1,10 +1,11 @@
 {
   "name": "pi-crofai",
-  "version": "1.0.0",
-  "description": "CrofAI (nahcrof) OpenAI-compatible provider for pi — chat completions + Responses API, live model discovery from /v1/models",
+  "version": "1.1.0",
+  "description": "CrofAI (nahcrof) OpenAI-compatible provider for pi — chat completions + Responses API, live model discovery from /v1/models, /login API-key flow",
   "keywords": ["pi-package", "crofai", "openai-compatible", "provider"],
   "license": "MIT",
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*"
   },
   "pi": {
